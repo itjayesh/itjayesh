@@ -1,3 +1,4 @@
+![logo](https://github.com/itjayesh/itjayesh/blob/main/banner.jpg)
 <h1 align="center">Hi 👋, I'm Jayesh Agarwal</h1>
 <h3 align="center">A passionate frontend developer from India</h3>
 <img align="right" alt="coding" width ="400" src="https://media1.tenor.com/images/ba6d7d37fa1e4ca966ac7328bf43b96c/tenor.gif?itemid=18657810"> 
