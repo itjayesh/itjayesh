@@ -1,0 +1,273 @@
+#include <lpc17xx.h>
+#include <stdio.h> // For using sprintf
+
+// --- Pin Definitions for ALS-SDA-ARMCTX-M3-01 ---
+
+// LCD Pins (4-bit mode)
+#define LCD_D4  (1 << 4)  // P0.4
+#define LCD_D5  (1 << 5)  // P0.5
+#define LCD_D6  (1 << 6)  // P0.6
+#define LCD_D7  (1 << 7)  // P0.7
+#define LCD_RS  (1 << 10) // P0.10
+#define LCD_EN  (1 << 12) // P0.12
+#define LCD_PINS ((LCD_D4)|(LCD_D5)|(LCD_D6)|(LCD_D7)|(LCD_RS)|(LCD_EN))
+
+// Keypad Pins
+// Rows (Output)
+#define KEYPAD_R1 (1 << 20) // P1.20
+#define KEYPAD_R2 (1 << 21) // P1.21
+#define KEYPAD_R3 (1 << 22) // P1.22
+#define KEYPAD_R4 (1 << 23) // P1.23
+// Columns (Input)
+#define KEYPAD_C1 (1 << 24) // P1.24
+#define KEYPAD_C2 (1 << 25) // P1.25
+#define KEYPAD_C3 (1 << 26) // P1.26
+#define KEYPAD_C4 (1 << 27) // P1.27
+#define KEYPAD_ROW_PINS ((KEYPAD_R1)|(KEYPAD_R2)|(KEYPAD_R3)|(KEYPAD_R4))
+#define KEYPAD_COL_PINS ((KEYPAD_C1)|(KEYPAD_C2)|(KEYPAD_C3)|(KEYPAD_C4))
+
+// Other Peripherals
+#define BUZZER_PIN (1 << 26) // P0.26
+#define LED_PIN    (1 << 0)  // P2.0 (Ready LED)
+
+// --- Global Variables ---
+unsigned int vote_count[4] = {0, 0, 0, 0};
+const char* candidate_names[] = {"BJP", "Congress", "Local Party", "NOTA"};
+volatile int is_polling_active = 0;
+volatile int poll_ended = 0;
+
+// Keypad character map
+const char key_map[4][4] = {
+    {'1', '2', '3', 'A'},
+    {'4', '5', '6', 'B'},
+    {'7', '8', '9', 'C'},
+    {'*', '0', '#', 'D'}
+};
+
+// --- Function Prototypes ---
+void delay_ms(unsigned int ms);
+
+// LCD Functions
+void lcd_init(void);
+void lcd_cmd(unsigned char cmd);
+void lcd_data(unsigned char data);
+void lcd_puts(const char *str);
+void lcd_gotoxy(int x, int y);
+void lcd_clear(void);
+
+// Keypad Functions
+void keypad_init(void);
+char keypad_get_key(void);
+
+// Peripheral Functions
+void buzzer_beep(void);
+void ready_led(int state);
+
+// Application Logic
+void display_options(void);
+void cast_vote(char key);
+void display_results(void);
+
+
+// --- Main Program ---
+int main(void) {
+    char key;
+    SystemInit();
+
+    // Initialize all hardware
+    lcd_init();
+    keypad_init();
+    LPC_GPIO0->FIODIR |= BUZZER_PIN; // Set Buzzer pin as output
+    LPC_GPIO2->FIODIR |= LED_PIN;   // Set LED pin as output
+    ready_led(0); // LED off initially
+
+    lcd_puts("   EVM Ready  ");
+    lcd_gotoxy(1, 2);
+    lcd_puts(" Press * to Start");
+
+    while (1) {
+        key = keypad_get_key();
+
+        if (key != 0) {
+            // Admin: Start/Stop Poll
+            if (key == '*') {
+                if (!poll_ended) {
+                    is_polling_active = !is_polling_active;
+                    if (is_polling_active) {
+                        display_options();
+                        ready_led(1);
+                    } else {
+                        poll_ended = 1;
+                        is_polling_active = 0;
+                        lcd_clear();
+                        lcd_puts(" Poll Ended. ");
+                        lcd_gotoxy(1, 2);
+                        lcd_puts("Press # for results");
+                        ready_led(0);
+                    }
+                }
+            }
+            // Admin: Display Results
+            else if (key == '#' && poll_ended) {
+                display_results();
+            }
+            // Voter: Cast Vote
+            else if (is_polling_active && (key >= '1' && key <= '4')) {
+                cast_vote(key);
+                // After vote, redisplay options
+                display_options();
+            }
+        }
+    }
+}
+
+// --- Function Implementations ---
+
+void delay_ms(unsigned int ms) {
+    unsigned int i, j;
+    for (i = 0; i < ms; i++) {
+        for (j = 0; j < 2000; j++); // Simple delay loop
+    }
+}
+
+void lcd_cmd(unsigned char cmd) {
+    LPC_GPIO0->FIOCLR = LCD_PINS;
+    LPC_GPIO0->FIOCLR = LCD_RS; // RS = 0 for command
+
+    // Send high nibble
+    LPC_GPIO0->FIOSET = (cmd & 0xF0) << 0;
+    LPC_GPIO0->FIOSET = LCD_EN;
+    delay_ms(2);
+    LPC_GPIO0->FIOCLR = LCD_EN;
+
+    // Send low nibble
+    LPC_GPIO0->FIOSET = (cmd & 0x0F) << 4;
+    LPC_GPIO0->FIOSET = LCD_EN;
+    delay_ms(2);
+    LPC_GPIO0->FIOCLR = LCD_EN;
+    delay_ms(5);
+}
+
+void lcd_data(unsigned char data) {
+    LPC_GPIO0->FIOCLR = LCD_PINS;
+    LPC_GPIO0->FIOSET = LCD_RS; // RS = 1 for data
+
+    // Send high nibble
+    LPC_GPIO0->FIOSET = (data & 0xF0) << 0;
+    LPC_GPIO0->FIOSET = LCD_EN;
+    delay_ms(2);
+    LPC_GPIO0->FIOCLR = LCD_EN;
+
+    // Send low nibble
+    LPC_GPIO0->FIOSET = (data & 0x0F) << 4;
+    LPC_GPIO0->FIOSET = LCD_EN;
+    delay_ms(2);
+    LPC_GPIO0->FIOCLR = LCD_EN;
+    delay_ms(5);
+}
+
+void lcd_init(void) {
+    LPC_GPIO0->FIODIR |= LCD_PINS;
+    delay_ms(50);
+    lcd_cmd(0x02); // Return home
+    lcd_cmd(0x28); // 4-bit mode, 2 lines, 5x7 font
+    lcd_cmd(0x0C); // Display ON, Cursor OFF
+    lcd_cmd(0x06); // Increment cursor
+    lcd_cmd(0x01); // Clear display
+    delay_ms(10);
+}
+
+void lcd_puts(const char *str) {
+    while (*str) {
+        lcd_data(*str++);
+    }
+}
+
+void lcd_gotoxy(int x, int y) {
+    unsigned char address = (y == 1) ? 0x80 : 0xC0;
+    address += (x - 1);
+    lcd_cmd(address);
+}
+
+void lcd_clear(void) {
+    lcd_cmd(0x01);
+    delay_ms(10);
+}
+
+void keypad_init(void) {
+    LPC_GPIO1->FIODIR |= KEYPAD_ROW_PINS; // Rows as output
+    LPC_GPIO1->FIODIR &= ~KEYPAD_COL_PINS; // Cols as input
+}
+
+char keypad_get_key(void) {
+    int i;
+    unsigned int col_val;
+
+    for (i = 0; i < 4; i++) {
+        LPC_GPIO1->FIOSET = KEYPAD_ROW_PINS;
+        LPC_GPIO1->FIOCLR = (1 << (20 + i)); // Set one row low
+
+        col_val = (LPC_GPIO1->FIOPIN >> 24) & 0x0F;
+
+        if (col_val != 0x0F) { // If a key is pressed in this row
+            if (col_val == 0x0E) return key_map[i][0]; // Col 1
+            if (col_val == 0x0D) return key_map[i][1]; // Col 2
+            if (col_val == 0x0B) return key_map[i][2]; // Col 3
+            if (col_val == 0x07) return key_map[i][3]; // Col 4
+        }
+    }
+    return 0; // No key pressed
+}
+
+void buzzer_beep(void) {
+    LPC_GPIO0->FIOSET = BUZZER_PIN;
+    delay_ms(150);
+    LPC_GPIO0->FIOCLR = BUZZER_PIN;
+}
+
+void ready_led(int state) {
+    if (state) {
+        LPC_GPIO2->FIOSET = LED_PIN;
+    } else {
+        LPC_GPIO2->FIOCLR = LED_PIN;
+    }
+}
+
+void display_options(void) {
+    lcd_clear();
+    lcd_puts("1:BJP   2:CONG");
+    lcd_gotoxy(1, 2);
+    lcd_puts("3:LOCAL 4:NOTA");
+}
+
+void cast_vote(char key) {
+    int candidate_index = key - '1'; // Convert '1'->0, '2'->1, etc.
+    
+    if (candidate_index >= 0 && candidate_index < 4) {
+        ready_led(0); // Turn off ready LED while processing vote
+        vote_count[candidate_index]++;
+
+        lcd_clear();
+        lcd_puts(" Vote Cast To: ");
+        lcd_gotoxy(1, 2);
+        lcd_puts(candidate_names[candidate_index]);
+
+        buzzer_beep();
+        delay_ms(2000); // Show message for 2 seconds
+
+        ready_led(1); // Turn ready LED back on
+    }
+}
+
+void display_results(void) {
+    char buffer1[17], buffer2[17];
+    lcd_clear();
+
+    // Format strings for display
+    sprintf(buffer1, "BJP:%d CONG:%d", vote_count[0], vote_count[1]);
+    sprintf(buffer2, "LOCAL:%d NOTA:%d", vote_count[2], vote_count[3]);
+    
+    lcd_puts(buffer1);
+    lcd_gotoxy(1, 2);
+    lcd_puts(buffer2);
+}
