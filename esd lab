@@ -1,9 +1,13 @@
 #include <lpc17xx.h>
-#include <stdio.h>
+#include <stdio.h> // Required for sprintf to format result strings
 
-// --- Pin Definitions ---
+/*
+----------------------------------------------------------------------
+-- PIN DEFINITIONS for ALS-SDA-ARMCTX-M3-01
+----------------------------------------------------------------------
+*/
 
-// LCD Pins (Connected via CNAD) - These remain the same
+// LCD Pins (Connected to Port 0 via CNAD)
 #define LCD_D4  (1 << 4)  // P0.4
 #define LCD_D5  (1 << 5)  // P0.5
 #define LCD_D6  (1 << 6)  // P0.6
@@ -12,178 +16,260 @@
 #define LCD_EN  (1 << 12) // P0.12
 #define LCD_PINS ((LCD_D4)|(LCD_D5)|(LCD_D6)|(LCD_D7)|(LCD_RS)|(LCD_EN))
 
-// --- NEW: Push Button Pins (Connected via CNB3) ---
-#define BTN_BJP   (1 << 10) // SW3 on P2.10
-#define BTN_CONG  (1 << 11) // SW4 on P2.11
-#define BTN_LOCAL (1 << 12) // SW5 on P2.12
-#define BTN_NOTA  (1 << 13) // SW6 on P2.13
-#define BTN_ADMIN_STAR (1 << 0) // SW7 on P2.0 (Note: Using a different P2 pin)
-#define BTN_ADMIN_HASH (1 << 1) // SW8 on P2.1 (Note: Using a different P2 pin)
-#define BUTTON_PINS ((BTN_BJP)|(BTN_CONG)|(BTN_LOCAL)|(BTN_NOTA)|(BTN_ADMIN_STAR)|(BTN_ADMIN_HASH))
-
+// Individual Push Button Pins (Connected to Port 2 via CNB3)
+#define BTN_BJP         (1 << 10) // SW3 for Candidate 1 (BJP)
+#define BTN_CONG        (1 << 11) // SW4 for Candidate 2 (Congress)
+#define BTN_LOCAL       (1 << 12) // SW5 for Candidate 3 (Local Party)
+#define BTN_NOTA        (1 << 13) // SW6 for Candidate 4 (NOTA)
+#define BTN_ADMIN_STAR  (1 << 0)  // SW7 for Admin Start/Stop (*)
+#define BTN_ADMIN_HASH  (1 << 1)  // SW8 for Admin Results (#)
+#define ALL_BUTTON_PINS ((BTN_BJP)|(BTN_CONG)|(BTN_LOCAL)|(BTN_NOTA)|(BTN_ADMIN_STAR)|(BTN_ADMIN_HASH))
 
 // Other Peripherals
 #define BUZZER_PIN (1 << 26) // P0.26
-#define LED_PIN    (1 << 2)  // P2.2 (Changed to avoid conflict with buttons)
+#define LED_PIN    (1 << 2)  // P2.2 (Ready to Vote LED)
 
-// --- Global Variables ---
+/*
+----------------------------------------------------------------------
+-- GLOBAL VARIABLES
+----------------------------------------------------------------------
+*/
 unsigned int vote_count[4] = {0, 0, 0, 0};
 const char* candidate_names[] = {"BJP", "Congress", "Local Party", "NOTA"};
 volatile int is_polling_active = 0;
 volatile int poll_ended = 0;
 
-
-// --- Function Prototypes ---
+/*
+----------------------------------------------------------------------
+-- FUNCTION PROTOTYPES
+----------------------------------------------------------------------
+*/
+// System
 void delay_ms(unsigned int ms);
+
+// Hardware Drivers
 void lcd_init(void);
 void lcd_cmd(unsigned char cmd);
 void lcd_data(unsigned char data);
 void lcd_puts(const char *str);
 void lcd_gotoxy(int x, int y);
 void lcd_clear(void);
-
-// MODIFIED: Button functions
 void buttons_init(void);
 char get_button_press(void);
-
 void buzzer_beep(void);
 void ready_led(int state);
-void display_options(void);
+
+// Application Logic
+void display_voting_options(void);
 void cast_vote(char key);
 void display_results(void);
 
-// --- Main Program ---
+/*
+----------------------------------------------------------------------
+-- MAIN PROGRAM
+----------------------------------------------------------------------
+*/
 int main(void) {
-    char key;
+    char pressed_key;
     SystemInit();
 
-    // Initialize all hardware
+    // Initialize all hardware components
     lcd_init();
-    buttons_init(); // Use new button init
-    LPC_GPIO0->FIODIR |= BUZZER_PIN;
-    LPC_GPIO2->FIODIR |= LED_PIN;   
-    ready_led(0); 
+    buttons_init();
+    LPC_GPIO0->FIODIR |= BUZZER_PIN; // Set Buzzer pin as output
+    LPC_GPIO2->FIODIR |= LED_PIN;   // Set LED pin as output
+    ready_led(0); // Ensure LED is off initially
 
+    // Initial welcome message
     lcd_puts("   EVM Ready  ");
     lcd_gotoxy(1, 2);
     lcd_puts("Press * to Start");
 
+    // Infinite loop to run the EVM
     while (1) {
-        key = get_button_press(); // Use new get button function
+        pressed_key = get_button_press();
 
-        if (key != 0) {
-            // Admin: Start/Stop Poll (SW7)
-            if (key == '*') {
-                if (!poll_ended) {
-                    is_polling_active = !is_polling_active;
+        if (pressed_key != 0) { // Check if any key was pressed
+            // Admin Action: Start or Stop the Poll (using SW7)
+            if (pressed_key == '*') {
+                if (!poll_ended) { // Can only start/stop if poll hasn't permanently ended
+                    is_polling_active = !is_polling_active; // Toggle polling state
                     if (is_polling_active) {
-                        display_options();
+                        display_voting_options();
                         ready_led(1);
                     } else {
-                        poll_ended = 1;
+                        poll_ended = 1; // Once stopped, it's permanently ended
                         is_polling_active = 0;
                         lcd_clear();
-                        lcd_puts(" Poll Ended. ");
+                        lcd_puts("  Poll Ended.   ");
                         lcd_gotoxy(1, 2);
                         lcd_puts("Press # for results");
                         ready_led(0);
                     }
                 }
             }
-            // Admin: Display Results (SW8)
-            else if (key == '#' && poll_ended) {
+            // Admin Action: Display Results (using SW8)
+            else if (pressed_key == '#' && poll_ended) {
                 display_results();
             }
-            // Voter: Cast Vote (SW3-SW6)
-            else if (is_polling_active && (key >= '1' && key <= '4')) {
-                cast_vote(key);
-                display_options();
+            // Voter Action: Cast a Vote (using SW3, SW4, SW5, SW6)
+            else if (is_polling_active && (pressed_key >= '1' && pressed_key <= '4')) {
+                cast_vote(pressed_key);
+                display_voting_options(); // Show voting options again after a vote
             }
         }
     }
 }
 
-// --- Function Implementations ---
+/*
+----------------------------------------------------------------------
+-- HARDWARE DRIVER IMPLEMENTATIONS
+----------------------------------------------------------------------
+*/
 
-// NEW: Initialize button pins as inputs
+// Initializes pins for the individual push buttons
 void buttons_init(void) {
-    LPC_GPIO2->FIODIR &= ~BUTTON_PINS;
+    // Set all specified button pins on Port 2 as inputs
+    LPC_GPIO2->FIODIR &= ~ALL_BUTTON_PINS;
 }
 
-// REPLACED: This function reads individual buttons instead of a matrix
+// Scans and returns which button is pressed
 char get_button_press(void) {
-    // Buttons are active-low (pressing connects them to ground)
-    if (!(LPC_GPIO2->FIOPIN & BTN_BJP))   { delay_ms(50); return '1'; }
-    if (!(LPC_GPIO2->FIOPIN & BTN_CONG))  { delay_ms(50); return '2'; }
-    if (!(LPC_GPIO2->FIOPIN & BTN_LOCAL)) { delay_ms(50); return '3'; }
-    if (!(LPC_GPIO2->FIOPIN & BTN_NOTA))  { delay_ms(50); return '4'; }
+    // Buttons are active-low, meaning a pressed button reads as 0 (GND)
+    if (!(LPC_GPIO2->FIOPIN & BTN_BJP))        { delay_ms(50); return '1'; }
+    if (!(LPC_GPIO2->FIOPIN & BTN_CONG))       { delay_ms(50); return '2'; }
+    if (!(LPC_GPIO2->FIOPIN & BTN_LOCAL))      { delay_ms(50); return '3'; }
+    if (!(LPC_GPIO2->FIOPIN & BTN_NOTA))       { delay_ms(50); return '4'; }
     if (!(LPC_GPIO2->FIOPIN & BTN_ADMIN_STAR)) { delay_ms(50); return '*'; }
     if (!(LPC_GPIO2->FIOPIN & BTN_ADMIN_HASH)) { delay_ms(50); return '#'; }
     
-    return 0; // No button pressed
+    return 0; // Return 0 (null) if no button is pressed
 }
 
+// Simple software delay
 void delay_ms(unsigned int ms) {
     unsigned int i, j;
     for (i = 0; i < ms; i++) {
-        for (j = 0; j < 2000; j++);
+        for (j = 0; j < 2000; j++); // Calibrate this loop for your clock speed if needed
     }
 }
 
-// --- All LCD, Buzzer, and Application Logic functions remain the same as before ---
-// (lcd_init, lcd_cmd, lcd_data, lcd_puts, lcd_gotoxy, lcd_clear)
-// (buzzer_beep, ready_led, display_options, cast_vote, display_results)
-// NOTE: For brevity, I am not repeating all the unchanged functions here.
-// Please copy them from the previous response.
+// Initializes the LCD in 4-bit mode
 void lcd_init(void) {
-    LPC_GPIO0->FIODIR |= LCD_PINS;
+    LPC_GPIO0->FIODIR |= LCD_PINS; // Set LCD pins as output
     delay_ms(50);
-    lcd_cmd(0x02); lcd_cmd(0x28); lcd_cmd(0x0C);
-    lcd_cmd(0x06); lcd_cmd(0x01); delay_ms(10);
+    lcd_cmd(0x02); // Force cursor to beginning
+    lcd_cmd(0x28); // 4-bit mode, 2 lines, 5x7 font
+    lcd_cmd(0x0C); // Display ON, Cursor OFF
+    lcd_cmd(0x06); // Auto-increment cursor
+    lcd_cmd(0x01); // Clear display
+    delay_ms(10);
 }
+
+// Sends a command to the LCD
 void lcd_cmd(unsigned char cmd) {
-    LPC_GPIO0->FIOCLR = LCD_PINS; LPC_GPIO0->FIOCLR = LCD_RS;
-    LPC_GPIO0->FIOSET = (cmd & 0xF0); LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
-    LPC_GPIO0->FIOSET = (cmd & 0x0F) << 4; LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
+    LPC_GPIO0->FIOCLR = LCD_PINS;
+    LPC_GPIO0->FIOCLR = LCD_RS; // RS=0 for command
+    LPC_GPIO0->FIOSET = (cmd & 0xF0); // Send high nibble
+    LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
+    LPC_GPIO0->FIOSET = (cmd & 0x0F) << 4; // Send low nibble
+    LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
     delay_ms(5);
 }
+
+// Sends data (a character) to the LCD
 void lcd_data(unsigned char data) {
-    LPC_GPIO0->FIOCLR = LCD_PINS; LPC_GPIO0->FIOSET = LCD_RS;
-    LPC_GPIO0->FIOSET = (data & 0xF0); LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
-    LPC_GPIO0->FIOSET = (data & 0x0F) << 4; LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
+    LPC_GPIO0->FIOCLR = LCD_PINS;
+    LPC_GPIO0->FIOSET = LCD_RS; // RS=1 for data
+    LPC_GPIO0->FIOSET = (data & 0xF0); // Send high nibble
+    LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
+    LPC_GPIO0->FIOSET = (data & 0x0F) << 4; // Send low nibble
+    LPC_GPIO0->FIOSET = LCD_EN; delay_ms(2); LPC_GPIO0->FIOCLR = LCD_EN;
     delay_ms(5);
 }
-void lcd_puts(const char *str) { while (*str) lcd_data(*str++); }
-void lcd_gotoxy(int x, int y) { lcd_cmd((y == 1) ? (0x80 + x - 1) : (0xC0 + x - 1)); }
-void lcd_clear(void) { lcd_cmd(0x01); delay_ms(10); }
-void buzzer_beep(void) { LPC_GPIO0->FIOSET = BUZZER_PIN; delay_ms(150); LPC_GPIO0->FIOCLR = BUZZER_PIN; }
-void ready_led(int state) { if (state) LPC_GPIO2->FIOSET = LED_PIN; else LPC_GPIO2->FIOCLR = LED_PIN; }
-void display_options(void) {
+
+// Prints a string to the LCD
+void lcd_puts(const char *str) {
+    while (*str) {
+        lcd_data(*str++);
+    }
+}
+
+// Moves the LCD cursor to a specific position (x, y)
+void lcd_gotoxy(int x, int y) {
+    unsigned char address = (y == 1) ? (0x80 + x - 1) : (0xC0 + x - 1);
+    lcd_cmd(address);
+}
+
+// Clears the entire LCD screen
+void lcd_clear(void) {
+    lcd_cmd(0x01);
+    delay_ms(10);
+}
+
+// Generates a short beep
+void buzzer_beep(void) {
+    LPC_GPIO0->FIOSET = BUZZER_PIN;
+    delay_ms(150);
+    LPC_GPIO0->FIOCLR = BUZZER_PIN;
+}
+
+// Controls the "Ready to Vote" LED
+void ready_led(int state) {
+    if (state) {
+        LPC_GPIO2->FIOSET = LED_PIN;
+    } else {
+        LPC_GPIO2->FIOCLR = LED_PIN;
+    }
+}
+
+/*
+----------------------------------------------------------------------
+-- APPLICATION LOGIC IMPLEMENTATIONS
+----------------------------------------------------------------------
+*/
+
+// Displays the candidate options on the screen
+void display_voting_options(void) {
     lcd_clear();
     lcd_puts("1:BJP   2:CONG");
     lcd_gotoxy(1, 2);
     lcd_puts("3:LOCAL 4:NOTA");
 }
+
+// Processes a cast vote
 void cast_vote(char key) {
-    int candidate_index = key - '1';
+    int candidate_index = key - '1'; // Convert char '1'..'4' to int 0..3
+    
     if (candidate_index >= 0 && candidate_index < 4) {
-        ready_led(0);
+        ready_led(0); // Indicate busy
         vote_count[candidate_index]++;
+
+        // Display confirmation message
         lcd_clear();
         lcd_puts(" Vote Cast To: ");
         lcd_gotoxy(1, 2);
         lcd_puts(candidate_names[candidate_index]);
+
         buzzer_beep();
-        delay_ms(2000);
-        ready_led(1);
+        delay_ms(2000); // Show message for 2 seconds
+
+        ready_led(1); // Indicate ready for next vote
     }
 }
+
+// Displays the final vote counts
 void display_results(void) {
-    char buffer1[17], buffer2[17];
+    char line1_buffer[17];
+    char line2_buffer[17];
+    
     lcd_clear();
-    sprintf(buffer1, "BJP:%d CONG:%d", vote_count[0], vote_count[1]);
-    sprintf(buffer2, "LOCAL:%d NOTA:%d", vote_count[2], vote_count[3]);
-    lcd_puts(buffer1);
+    
+    // Use sprintf to format the vote counts into strings
+    sprintf(line1_buffer, "BJP:%d CONG:%d", vote_count[0], vote_count[1]);
+    sprintf(line2_buffer, "LOCAL:%d NOTA:%d", vote_count[2], vote_count[3]);
+    
+    lcd_puts(line1_buffer);
     lcd_gotoxy(1, 2);
-    lcd_puts(buffer2);
+    lcd_puts(line2_buffer);
 }
