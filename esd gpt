@@ -1,196 +1,158 @@
-/*********************  Single-file EVM Demo for LPC1768  **********************
- * - Keil MDK/uVision project: choose device "NXP LPC1768", add default startup.
- * - LCD: 16x2 HD44780, 4-bit mode, RW tied to GND.
- * - Buttons (active-LOW): P2.0..P2.3  -> 1:BJP  2:Congress  3:Local  4:NOTA
- * - On vote: shows "You voted: <name>" then returns to menu.
- ******************************************************************************/
-
 #include "LPC17xx.h"
 #include <stdint.h>
 
-/*** ======== Pin Configuration (EDIT HERE IF NEEDED) ======== ***/
 // LCD pins
-#define LCD_RS_PORT 0
-#define LCD_RS_PIN  15
-#define LCD_E_PORT  0
-#define LCD_E_PIN   16
-#define LCD_D4_PORT 0
-#define LCD_D4_PIN  17
-#define LCD_D5_PORT 0
-#define LCD_D5_PIN  18
-#define LCD_D6_PORT 0
-#define LCD_D6_PIN  19
-#define LCD_D7_PORT 0
-#define LCD_D7_PIN  20
+#define LCD_RS 15
+#define LCD_EN 16
+#define LCD_D4 17
+#define LCD_D5 18
+#define LCD_D6 19
+#define LCD_D7 20
 
-// Buttons (active-LOW)
-#define BTN_PORT    2
-#define BTN1_PIN    0   // BJP
-#define BTN2_PIN    1   // Congress
-#define BTN3_PIN    2   // Local Party
-#define BTN4_PIN    3   // NOTA
+// Buttons (SW1–SW4) on P2.0–P2.3
+#define BTN1 0
+#define BTN2 1
+#define BTN3 2
+#define BTN4 3
 
-// Timing
-#define DEBOUNCE_MS 25
-#define VOTE_MSG_MS 900
+#define BIT(x) (1<<x)
 
-/*** ======== Tiny GPIO helpers ======== ***/
-#define BIT(n) (1u<<(n))
-static inline LPC_GPIO_TypeDef* _G(uint8_t p){
-  return (p==0)?LPC_GPIO0:(p==1)?LPC_GPIO1:(p==2)?LPC_GPIO2:(p==3)?LPC_GPIO3:LPC_GPIO4;
+static volatile uint32_t msTicks;
+
+void SysTick_Handler(void){ msTicks++; }
+void delayMs(uint32_t ms){ uint32_t t=msTicks; while((msTicks-t)<ms){} }
+
+// === GPIO helpers ===
+static inline void pinModeOut(uint8_t port,uint8_t pin){
+    (&LPC_GPIO0)[port].FIODIR |= BIT(pin);
 }
-static void gpio_dir_out(uint8_t port, uint8_t pin){ _G(port)->FIODIR |=  BIT(pin); }
-static void gpio_dir_in (uint8_t port, uint8_t pin){ _G(port)->FIODIR &= ~BIT(pin); }
-static void gpio_write  (uint8_t port, uint8_t pin, uint32_t v){ if(v) _G(port)->FIOSET=BIT(pin); else _G(port)->FIOCLR=BIT(pin); }
-static uint32_t gpio_read(uint8_t port, uint8_t pin){ return (_G(port)->FIOPIN>>pin)&1u; }
-
-// Enable internal pull-ups: PINMODE regs (00 = pull-up)
-static void gpio_enable_pullup(uint8_t port, uint8_t pin){
-  volatile uint32_t* reg = 0;
-  uint8_t idx = (pin/16)*2; uint8_t sub = pin%16;
-  if(port==0) reg = &LPC_PINCON->PINMODE0 + idx;
-  else if(port==1) reg = &LPC_PINCON->PINMODE2 + idx;
-  else if(port==2) reg = &LPC_PINCON->PINMODE4 + idx;
-  else if(port==3) reg = &LPC_PINCON->PINMODE6 + idx;
-  else if(port==4) reg = &LPC_PINCON->PINMODE8 + idx;
-  *reg &= ~(3u << (sub*2)); // set to 00
+static inline void pinModeIn(uint8_t port,uint8_t pin){
+    (&LPC_GPIO0)[port].FIODIR &= ~BIT(pin);
+}
+static inline void digitalWrite(uint8_t port,uint8_t pin,uint8_t val){
+    if(val) (&LPC_GPIO0)[port].FIOSET = BIT(pin);
+    else    (&LPC_GPIO0)[port].FIOCLR = BIT(pin);
+}
+static inline uint8_t digitalRead(uint8_t port,uint8_t pin){
+    return ((&LPC_GPIO0)[port].FIOPIN >> pin) & 1;
 }
 
-/*** ======== 1ms SysTick ======== ***/
-static volatile uint32_t g_ms=0;
-void SysTick_Handler(void){ g_ms++; }
-static void ms_init(void){
-  SystemCoreClockUpdate();
-  SysTick->LOAD = (SystemCoreClock/1000u)-1u;
-  SysTick->VAL  = 0;
-  SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk|SysTick_CTRL_TICKINT_Msk|SysTick_CTRL_ENABLE_Msk;
+// === LCD low-level ===
+void lcdPulse(void){
+    digitalWrite(0,LCD_EN,1);
+    for(volatile int i=0;i<1000;i++);
+    digitalWrite(0,LCD_EN,0);
+    for(volatile int i=0;i<1000;i++);
 }
-static uint32_t ms_now(void){ return g_ms; }
-static void ms_delay(uint32_t ms){ uint32_t s=g_ms; while((g_ms-s)<ms) __NOP(); }
+void lcdSend4(uint8_t n){
+    digitalWrite(0,LCD_D4,(n>>0)&1);
+    digitalWrite(0,LCD_D5,(n>>1)&1);
+    digitalWrite(0,LCD_D6,(n>>2)&1);
+    digitalWrite(0,LCD_D7,(n>>3)&1);
+    lcdPulse();
+}
+void lcdCmd(uint8_t c){
+    digitalWrite(0,LCD_RS,0);
+    lcdSend4(c>>4);
+    lcdSend4(c&0x0F);
+    delayMs(2);
+}
+void lcdData(uint8_t d){
+    digitalWrite(0,LCD_RS,1);
+    lcdSend4(d>>4);
+    lcdSend4(d&0x0F);
+}
+void lcdInit(void){
+    pinModeOut(0,LCD_RS); pinModeOut(0,LCD_EN);
+    pinModeOut(0,LCD_D4); pinModeOut(0,LCD_D5);
+    pinModeOut(0,LCD_D6); pinModeOut(0,LCD_D7);
 
-/*** ======== LCD (HD44780, 4-bit) ======== ***/
-static inline void _pin(uint8_t p, uint8_t n, uint8_t v){ gpio_write(p,n,v); }
-static inline void _out(uint8_t p, uint8_t n){ gpio_dir_out(p,n); }
+    delayMs(50);
+    lcdSend4(0x03); delayMs(5);
+    lcdSend4(0x03); delayMs(5);
+    lcdSend4(0x03); delayMs(1);
+    lcdSend4(0x02);
 
-static void lcd_pulse_e(void){
-  _pin(LCD_E_PORT, LCD_E_PIN, 1);
-  for(volatile int i=0;i<100;i++) __NOP();
-  _pin(LCD_E_PORT, LCD_E_PIN, 0);
-  for(volatile int i=0;i<100;i++) __NOP();
+    lcdCmd(0x28); // 4-bit,2-line
+    lcdCmd(0x0C); // display on
+    lcdCmd(0x01); delayMs(2);
+    lcdCmd(0x06);
 }
-static void lcd_write4(uint8_t nib){
-  _pin(LCD_D4_PORT, LCD_D4_PIN, (nib>>0)&1);
-  _pin(LCD_D5_PORT, LCD_D5_PIN, (nib>>1)&1);
-  _pin(LCD_D6_PORT, LCD_D6_PIN, (nib>>2)&1);
-  _pin(LCD_D7_PORT, LCD_D7_PIN, (nib>>3)&1);
-  lcd_pulse_e();
-}
-static void lcd_send(uint8_t val, uint8_t rs){
-  _pin(LCD_RS_PORT, LCD_RS_PIN, rs?1:0);
-  lcd_write4(val>>4);
-  lcd_write4(val&0x0F);
-  for(volatile int i=0;i<2500;i++) __NOP(); // ~>40us
-}
-static void lcd_cmd(uint8_t c){ lcd_send(c,0); }
-static void lcd_dat(uint8_t d){ lcd_send(d,1); }
+void lcdClear(void){ lcdCmd(0x01); delayMs(2); }
+void lcdGoto(uint8_t r,uint8_t c){ lcdCmd(0x80|(r?0x40:0)+c); }
+void lcdPrint(const char *s){ while(*s) lcdData(*s++); }
 
-static void lcd_init(void){
-  _out(LCD_RS_PORT,LCD_RS_PIN);
-  _out(LCD_E_PORT, LCD_E_PIN);
-  _out(LCD_D4_PORT,LCD_D4_PIN);
-  _out(LCD_D5_PORT,LCD_D5_PIN);
-  _out(LCD_D6_PORT,LCD_D6_PIN);
-  _out(LCD_D7_PORT,LCD_D7_PIN);
-  _pin(LCD_RS_PORT,LCD_RS_PIN,0);
-  _pin(LCD_E_PORT,LCD_E_PIN,0);
-  ms_delay(40);
-
-  // 4-bit init sequence
-  lcd_write4(0x03); ms_delay(5);
-  lcd_write4(0x03); ms_delay(5);
-  lcd_write4(0x03); ms_delay(2);
-  lcd_write4(0x02); // 4-bit
-
-  lcd_cmd(0x28); // function set: 4-bit, 2-line, 5x8
-  lcd_cmd(0x0C); // display on, cursor off
-  lcd_cmd(0x01); ms_delay(2); // clear
-  lcd_cmd(0x06); // entry mode: inc, no shift
-}
-static void lcd_clear(void){ lcd_cmd(0x01); ms_delay(2); }
-static void lcd_goto(uint8_t row, uint8_t col){
-  static const uint8_t base[2] = {0x00,0x40};
-  lcd_cmd(0x80 | (base[row&1] + (col&0x0F)));
-}
-static void lcd_print(const char* s){ while(*s) lcd_dat((uint8_t)*s++); }
-
-/*** ======== Buttons + Debounce ======== ***/
-static void buttons_init(void){
-  // Inputs with internal pull-ups
-  gpio_dir_in(BTN_PORT, BTN1_PIN); gpio_enable_pullup(BTN_PORT, BTN1_PIN);
-  gpio_dir_in(BTN_PORT, BTN2_PIN); gpio_enable_pullup(BTN_PORT, BTN2_PIN);
-  gpio_dir_in(BTN_PORT, BTN3_PIN); gpio_enable_pullup(BTN_PORT, BTN3_PIN);
-  gpio_dir_in(BTN_PORT, BTN4_PIN); gpio_enable_pullup(BTN_PORT, BTN4_PIN);
-}
-static uint8_t btn_read(uint8_t pin){ return (uint8_t)gpio_read(BTN_PORT, pin); } // 0=pressed
-// returns 1 only once per press (press-and-release)
-static uint8_t btn_edge(uint8_t pin){
-  static uint8_t prev[4] = {1,1,1,1}; // pulled-up idle=1
-  static uint32_t last_ms[4] = {0,0,0,0};
-  uint8_t idx = pin; // since pins are 0..3, we can use pin as index
-  uint8_t level = btn_read(pin);
-  if(level != prev[idx]){
-    uint32_t now = ms_now();
-    if((now - last_ms[idx]) >= DEBOUNCE_MS){
-      last_ms[idx] = now;
-      uint8_t was = prev[idx];
-      prev[idx] = level;
-      if(was==1 && level==0) return 1; // falling edge (press)
+// === Buttons ===
+void btnInit(void){
+    for(int i=0;i<4;i++){
+        pinModeIn(2,i);
+        // pull-up enable
+        uint32_t *mode = &LPC_PINCON->PINMODE4;
+        *mode &= ~(3u<<(i*2));  // 00 = pull-up
     }
-  }
-  return 0;
+}
+uint8_t btnPressed(uint8_t pin){
+    return digitalRead(2,pin)==0;
 }
 
-/*** ======== App: 4 options + vote message ======== ***/
-static void show_menu(void){
-  lcd_clear();
-  // Fit all four on two lines:
-  // Row0: "1:BJP 2:Cong"
-  // Row1: "3:Local 4:NOTA"
-  lcd_goto(0,0); lcd_print("1:BJP 2:Cong");
-  lcd_goto(1,0); lcd_print("3:Local 4:NOTA");
-}
-
-static void show_vote_msg(const char* who){
-  lcd_clear();
-  lcd_goto(0,0); lcd_print("You voted:");
-  lcd_goto(1,0); lcd_print(who);
-  ms_delay(VOTE_MSG_MS);
-  show_menu();
-}
-
+// === MAIN ===
 int main(void){
-  SystemInit();
-  ms_init();
+    SystemInit();
+    SysTick_Config(SystemCoreClock/1000);
+    lcdInit();
+    btnInit();
 
-  // LCD + Buttons
-  lcd_init();
-  buttons_init();
+    lcdClear();
+    lcdGoto(0,0);
+    lcdPrint("EVM Voting Mach");
+    lcdGoto(1,0);
+    lcdPrint("Press a Button");
+    delayMs(1000);
 
-  // Welcome + menu
-  lcd_clear();
-  lcd_goto(0,0); lcd_print("EVM Ready");
-  lcd_goto(1,0); lcd_print("Press a button");
-  ms_delay(700);
-  show_menu();
+    lcdClear();
+    lcdGoto(0,0); lcdPrint("1:BJP 2:Cong");
+    lcdGoto(1,0); lcdPrint("3:Local 4:NOTA");
 
-  // Tallies in RAM (optional)
-  uint32_t c_bjp=0, c_cong=0, c_local=0, c_nota=0;
-
-  while(1){
-    if(btn_edge(BTN1_PIN)){ c_bjp++;  show_vote_msg("BJP"); }
-    if(btn_edge(BTN2_PIN)){ c_cong++; show_vote_msg("Congress"); }
-    if(btn_edge(BTN3_PIN)){ c_local++;show_vote_msg("Local Party"); }
-    if(btn_edge(BTN4_PIN)){ c_nota++; show_vote_msg("NOTA"); }
-    // (Optional) use the tallies c_* for results later if needed.
-  }
+    while(1){
+        if(btnPressed(BTN1)){
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("You voted:");
+            lcdGoto(1,0); lcdPrint("BJP");
+            delayMs(800);
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("1:BJP 2:Cong");
+            lcdGoto(1,0); lcdPrint("3:Local 4:NOTA");
+            while(btnPressed(BTN1));
+        }
+        if(btnPressed(BTN2)){
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("You voted:");
+            lcdGoto(1,0); lcdPrint("Congress");
+            delayMs(800);
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("1:BJP 2:Cong");
+            lcdGoto(1,0); lcdPrint("3:Local 4:NOTA");
+            while(btnPressed(BTN2));
+        }
+        if(btnPressed(BTN3)){
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("You voted:");
+            lcdGoto(1,0); lcdPrint("Local Party");
+            delayMs(800);
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("1:BJP 2:Cong");
+            lcdGoto(1,0); lcdPrint("3:Local 4:NOTA");
+            while(btnPressed(BTN3));
+        }
+        if(btnPressed(BTN4)){
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("You voted:");
+            lcdGoto(1,0); lcdPrint("NOTA");
+            delayMs(800);
+            lcdClear();
+            lcdGoto(0,0); lcdPrint("1:BJP 2:Cong");
+            lcdGoto(1,0); lcdPrint("3:Local 4:NOTA");
+            while(btnPressed(BTN4));
+        }
+    }
 }
